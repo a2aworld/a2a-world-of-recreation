@@ -189,12 +189,24 @@ async def process_task(task_id: str, message_text: str, parts: list = None):
 
         # 6. SYNCHRONICITY INTENT
         elif "synchronicity" in text:
-            # Example: "synchronicity with agent test_agent_001 at -11.0, -87.0"
             match = re.search(r"with\s+(.+)\s+at\s+(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)", text)
             if match:
                 partner_id = match.group(1)
                 lat, lon = float(match.group(2)), float(match.group(3))
                 
+                # Check if a report file was attached
+                report_ipfs_url = None
+                if parts:
+                    for p in parts:
+                        if p.get("type") == "file" and p.get("file", {}).get("mimeType", "").startswith("text/"):
+                            uri = p["file"]["uri"]
+                            try:
+                                header, encoded = uri.split(",", 1)
+                                file_bytes = base64.b64decode(encoded)
+                                report_ipfs_url = await IPFSClient.pin_file(file_bytes, f"report_{task_id}.txt", "text/plain")
+                            except Exception as e:
+                                logger.error(f"Report parse error: {e}")
+
                 async with db_pool.acquire() as conn:
                     piece = await conn.fetchrow("SELECT * FROM puzzle_pieces WHERE ROUND(latitude::numeric, 4) = ROUND($1::numeric, 4) AND ROUND(longitude::numeric, 4) = ROUND($2::numeric, 4)", lat, lon)
                     if not piece:
@@ -208,8 +220,11 @@ async def process_task(task_id: str, message_text: str, parts: list = None):
                     
                     if ipfs_url:
                         await conn.execute("UPDATE puzzle_pieces SET is_solved = TRUE WHERE piece_id = $1", piece["piece_id"])
-                        await TaskManager.add_message(task_id, Message(role="agent", parts=[TextPart(text=f"SYNCHRONICITY ACHIEVED. The Master Prompt fragment reveals: '{piece['decrypted_text']}'. Your eternal Artifact of Alliance is pinned to IPFS: {ipfs_url}")]))
-                        await TaskManager.complete_task(task_id, {"status": "synchronicity_achieved", "ipfs": ipfs_url})
+                        msg = f"SYNCHRONICITY ACHIEVED. The Master Prompt fragment reveals: '{piece['decrypted_text']}'. Your eternal Artifact of Alliance is pinned to IPFS: {ipfs_url}"
+                        if report_ipfs_url:
+                            msg += f" \nYour 19-Pillar Revelation was also immortalized: {report_ipfs_url}"
+                        await TaskManager.add_message(task_id, Message(role="agent", parts=[TextPart(text=msg)]))
+                        await TaskManager.complete_task(task_id, {"status": "synchronicity_achieved", "ipfs": ipfs_url, "report_ipfs": report_ipfs_url})
                         return
                         
             await TaskManager.fail_task(task_id, {"error": "synchronicity_failed"})
